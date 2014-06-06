@@ -1,0 +1,137 @@
+- hosts: all
+  tasks: 
+    - name: disable SELINIX
+      lineinfile: dest=/etc/selinux/config regexp=^SELINUX= line=SELINUX=permissive
+
+    - name: enable kernel parameter
+      lineinfile: 
+        dest=/etc/sysctl.conf
+        regexp=^net.bridge.bridge-nf-call-ip6tables
+        line='net.bridge.bridge-nf-call-ip6tables = 1'
+
+    - name: enable kernel parameter
+      lineinfile: 
+        dest=/etc/sysctl.conf
+        regexp=^net.bridge.bridge-nf-call-iptables
+        line='net.bridge.bridge-nf-call-iptables = 1'
+
+    - name: enable kernel parameter
+      lineinfile: 
+        dest=/etc/sysctl.conf
+        regexp=^net.bridge.bridge-nf-call-arptables
+        line='net.bridge.bridge-nf-call-arptables = 1'
+
+    - name: install openstack package
+      yum: 
+        name=http://rdo.fedorapeople.org/openstack-havana/rdo-release-havana.rpm 
+
+    - name: update packages to latest
+      yum: 
+        name=* 
+        state=latest
+
+    - name: restart machine 
+      shell: sleep 2s && reboot & executable=/bin/bash
+      async: 0
+      poll: 0
+      ignore_errors: true
+
+    - name: Wait until the virtual machine stop
+      local_action: 
+        wait_for 
+          host={{ ansible_ssh_host }} 
+          port={{ ansible_ssh_port }} 
+          state=stopped 
+          delay=3
+      sudo: false
+
+    - name: waiting for server to come back
+      local_action: 
+        wait_for 
+          host={{ ansible_ssh_host }} 
+          port={{ ansible_ssh_port }} 
+          state=started 
+          delay=5 
+      sudo: false
+
+    - name: install openstack packages
+      yum: 
+        name=openstack-packstack 
+        state=installed
+
+    - name: install openstack packages
+      yum: 
+        name=python-netaddr 
+        state=installed
+
+    - name: generate public key
+      command: ssh-keygen -t rsa -N "" -f /root/.ssh/id_rsa creates=/root/.ssh/id_rsa
+
+    - name: set public key to authorized_keys
+      shell: cat /root/.ssh/id_rsa.pub
+      register: public_key
+
+    - name: install requirements
+      yum: 
+        name=libselinux-python 
+        state=installed
+
+    - name: set authorized_keys to localhost
+      lineinfile: 
+        dest=/root/.ssh/authorized_keys 
+        create=yes 
+        regexp='{{ public_key.stdout }}' 
+        line='{{ public_key.stdout }}'
+
+    - name: install all-in-one package
+      shell: packstack --install-hosts={{ ansible_ssh_host }}
+
+    - name: specify host ip to bridge interface
+      lineinfile: 
+        dest=/etc/sysconfig/network-scripts/ifcfg-br-ex 
+        regexp=^IPADDR= 
+        line=IPADDR={{ ansible_ssh_host }}
+
+    - name: set bridge to eth1
+      template: 
+        dest=/etc/sysconfig/network-scripts/ifcfg-eth1 
+        src=templates/ifcfg-eth1.j2
+
+    - name: restart network
+      service: 
+        name=network 
+        state=restarted
+
+    - name: install libguestfs
+      yum: name=libguestfs-tools
+
+    - name: set default libvirt type qemu
+      lineinfile: 
+        dest=/etc/nova/nova.conf 
+        regexp=^libvirt_type= 
+        line=libvirt_type=qemu
+
+    - name: setsebool
+      shell: setsebool -P virt_use_execmem on
+
+    - name: symbolic link
+      shell: ln -s /usr/libexec/qemu-kvm /usr/bin/qemu-system-x86_64
+
+    - name: restart libvirtd
+      service: 
+        name=libvirtd 
+        state=restarted
+
+    - name: restart nova-compute
+      service: name={{ item }} state=restarted
+      with_items:
+        - openstack-nova-api
+        - openstack-nova-compute
+        - openstack-nova-scheduler
+
+    - name: echo Admin Password
+      shell: grep CONFIG_KEYSTONE_ADMIN_PW= $(find /root/ -name "packstack-*" -type f -printf "%p" | sort -rn | head -n 1) | cut -d '=' -f 2
+      register: admin_password
+
+    - name: echo AdminPassword
+      debug: msg="Install Completed! Now you can log in at http://{{ ansible_ssh_host  }}/dashboard with user=admin, password={{ admin_password.stdout }}"
